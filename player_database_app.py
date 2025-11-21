@@ -3,7 +3,9 @@ import pandas as pd
 from datetime import date, timedelta
 import os
 import uuid
-from io import BytesIO
+from io import BytesIO, StringIO
+import requests
+from base64 import b64encode, b64decode
 
 # -------------------------
 # CONFIG & CONSTANTS
@@ -49,22 +51,107 @@ EVENT_TYPES = ["AVC", "FIVB", "AVC Multi/Zonal", "Other Multi/Zonal"]
 
 GENDER_OPTIONS = ["", "Male", "Female"]  # "" = not specified
 
+# -------------------------
+# GITHUB STORAGE CONFIG
+# -------------------------
+
+USE_GITHUB = False
+GH_OWNER = GH_REPO = GH_BRANCH = GH_TOKEN = None
+
+try:
+    if "github" in st.secrets:
+        gh_cfg = st.secrets["github"]
+        GH_TOKEN = gh_cfg.get("token")
+        GH_OWNER = gh_cfg.get("repo_owner")
+        GH_REPO = gh_cfg.get("repo_name")
+        GH_BRANCH = gh_cfg.get("branch", "main")
+        if GH_TOKEN and GH_OWNER and GH_REPO:
+            USE_GITHUB = True
+except Exception:
+    USE_GITHUB = False
+
+
+def github_headers():
+    return {
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+
+
+def github_get_file(path: str):
+    """Get a file from GitHub repo via contents API.
+       Returns (bytes_content, sha) or (None, None) if not found/error.
+    """
+    if not USE_GITHUB:
+        return None, None
+
+    path = path.replace("\\", "/")
+    url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/contents/{path}"
+    params = {}
+    if GH_BRANCH:
+        params["ref"] = GH_BRANCH
+
+    resp = requests.get(url, headers=github_headers(), params=params)
+    if resp.status_code == 200:
+        data = resp.json()
+        content = b64decode(data["content"])
+        sha = data["sha"]
+        return content, sha
+    elif resp.status_code == 404:
+        return None, None
+    else:
+        st.error(f"GitHub read error for {path}: {resp.status_code} {resp.text}")
+        return None, None
+
+
+def github_put_file(path: str, content_bytes: bytes, message: str):
+    """Create or update a file in the GitHub repo."""
+    if not USE_GITHUB:
+        return
+
+    path = path.replace("\\", "/")
+    url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/contents/{path}"
+
+    # Check if file exists to get sha
+    existing_content, existing_sha = github_get_file(path)
+    payload = {
+        "message": message,
+        "content": b64encode(content_bytes).decode("utf-8"),
+        "branch": GH_BRANCH or "main",
+    }
+    if existing_content is not None and existing_sha:
+        payload["sha"] = existing_sha
+
+    resp = requests.put(url, headers=github_headers(), json=payload)
+    if resp.status_code not in (200, 201):
+        st.error(f"GitHub write error for {path}: {resp.status_code} {resp.text}")
+
 
 # -------------------------
 # UTIL FUNCTIONS
 # -------------------------
 
 def ensure_dirs():
+    """For local mode only (no effect when using GitHub)."""
+    if USE_GITHUB:
+        return
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(PHOTOS_DIR, exist_ok=True)
 
 
 def load_players():
-    ensure_dirs()
-    if os.path.exists(PLAYERS_FILE):
-        df = pd.read_csv(PLAYERS_FILE, dtype=str)
+    if USE_GITHUB:
+        content, _ = github_get_file(PLAYERS_FILE)
+        if content is None:
+            df = pd.DataFrame(columns=PLAYER_COLUMNS)
+        else:
+            df = pd.read_csv(StringIO(content.decode("utf-8")), dtype=str)
     else:
-        df = pd.DataFrame(columns=PLAYER_COLUMNS)
+        ensure_dirs()
+        if os.path.exists(PLAYERS_FILE):
+            df = pd.read_csv(PLAYERS_FILE, dtype=str)
+        else:
+            df = pd.DataFrame(columns=PLAYER_COLUMNS)
 
     # Ensure all columns exist (for old CSVs)
     for col in PLAYER_COLUMNS:
@@ -76,11 +163,18 @@ def load_players():
 
 
 def load_results():
-    ensure_dirs()
-    if os.path.exists(RESULTS_FILE):
-        df = pd.read_csv(RESULTS_FILE, dtype=str)
+    if USE_GITHUB:
+        content, _ = github_get_file(RESULTS_FILE)
+        if content is None:
+            df = pd.DataFrame(columns=RESULT_COLUMNS)
+        else:
+            df = pd.read_csv(StringIO(content.decode("utf-8")), dtype=str)
     else:
-        df = pd.DataFrame(columns=RESULT_COLUMNS)
+        ensure_dirs()
+        if os.path.exists(RESULTS_FILE):
+            df = pd.read_csv(RESULTS_FILE, dtype=str)
+        else:
+            df = pd.DataFrame(columns=RESULT_COLUMNS)
 
     if not df.empty:
         for col in ["points", "prize_money"]:
@@ -92,13 +186,21 @@ def load_results():
 
 
 def save_players(df):
-    ensure_dirs()
-    df.to_csv(PLAYERS_FILE, index=False)
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    if USE_GITHUB:
+        github_put_file(PLAYERS_FILE, csv_bytes, "Update players.csv from Streamlit app")
+    else:
+        ensure_dirs()
+        df.to_csv(PLAYERS_FILE, index=False)
 
 
 def save_results(df):
-    ensure_dirs()
-    df.to_csv(RESULTS_FILE, index=False)
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    if USE_GITHUB:
+        github_put_file(RESULTS_FILE, csv_bytes, "Update results.csv from Streamlit app")
+    else:
+        ensure_dirs()
+        df.to_csv(RESULTS_FILE, index=False)
 
 
 def new_id():
@@ -312,18 +414,25 @@ def page_add_edit_player():
             st.error("Please enter at least a first name or last name.")
             return
 
-        ensure_dirs()
-
+        # New player
         if player_row is None:
-            # New player
             player_id = new_id()
             photo_path = ""
             if photo_file is not None:
                 ext = os.path.splitext(photo_file.name)[1]
                 photo_filename = f"{player_id}{ext}"
-                photo_path = os.path.join("photos", photo_filename)
-                with open(os.path.join(DATA_DIR, photo_path), "wb") as f:
-                    f.write(photo_file.getbuffer())
+                photo_path = f"photos/{photo_filename}"
+
+                if USE_GITHUB:
+                    github_put_file(
+                        os.path.join(DATA_DIR, photo_path),
+                        bytes(photo_file.getbuffer()),
+                        f"Upload photo for player {player_id}",
+                    )
+                else:
+                    ensure_dirs()
+                    with open(os.path.join(DATA_DIR, photo_path), "wb") as f:
+                        f.write(photo_file.getbuffer())
 
             new_player = pd.DataFrame(
                 [{
@@ -350,9 +459,18 @@ def page_add_edit_player():
             if photo_file is not None:
                 ext = os.path.splitext(photo_file.name)[1]
                 photo_filename = f"{player_row['player_id']}{ext}"
-                photo_path = os.path.join("photos", photo_filename)
-                with open(os.path.join(DATA_DIR, photo_path), "wb") as f:
-                    f.write(photo_file.getbuffer())
+                photo_path = f"photos/{photo_filename}"
+
+                if USE_GITHUB:
+                    github_put_file(
+                        os.path.join(DATA_DIR, photo_path),
+                        bytes(photo_file.getbuffer()),
+                        f"Upload/update photo for player {player_row['player_id']}",
+                    )
+                else:
+                    ensure_dirs()
+                    with open(os.path.join(DATA_DIR, photo_path), "wb") as f:
+                        f.write(photo_file.getbuffer())
 
             players_df.loc[idx, "first_name"] = first_name.strip()
             players_df.loc[idx, "last_name"] = last_name.strip()
@@ -757,11 +875,19 @@ def page_player_search():
         st.write(f"**Nationality:** {row['nationality']}")
     with col2:
         if isinstance(row["photo_file"], str) and row["photo_file"]:
-            photo_path = os.path.join(DATA_DIR, row["photo_file"])
-            if os.path.exists(photo_path):
-                st.image(photo_path, caption="Photo ID", use_container_width=True)
+            photo_rel = row["photo_file"]
+            local_path = os.path.join(DATA_DIR, photo_rel)
+            if USE_GITHUB:
+                content, _ = github_get_file(local_path)
+                if content is not None:
+                    st.image(content, caption="Photo ID", use_container_width=True)
+                else:
+                    st.caption("Photo path saved but file not found in GitHub.")
             else:
-                st.caption("Photo path saved but file not found.")
+                if os.path.exists(local_path):
+                    st.image(local_path, caption="Photo ID", use_container_width=True)
+                else:
+                    st.caption("Photo path saved but file not found.")
 
     st.markdown("### Results history")
     player_results = results_df[results_df["player_id"] == player_id]
@@ -802,7 +928,7 @@ def page_ranking_calculator():
     mode = st.radio(
         "Point calculation period",
         ["Last 365 days from reference date", "Custom date range"],
-        );
+    )
 
     if mode == "Last 365 days from reference date":
         ref_date = st.date_input("Reference date", value=date.today())
@@ -1192,7 +1318,7 @@ def page_multi_team_report():
 
 
 # -------------------------
-# PAGE: AVC RANKINGS (MEN & WOMEN)
+# PAGE: AVC RANKINGS (MEN & WOMEN) – FANCY CARDS
 # -------------------------
 
 def page_avc_rankings():
@@ -1487,6 +1613,11 @@ def page_avc_rankings():
 
 def main():
     st.sidebar.title("🏐 Player Database")
+    if USE_GITHUB:
+        st.sidebar.success("GitHub storage: ON")
+    else:
+        st.sidebar.warning("GitHub storage: OFF (local / ephemeral on Streamlit Cloud)")
+
     page = st.sidebar.radio(
         "Go to",
         [

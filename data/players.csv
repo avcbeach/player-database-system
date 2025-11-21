@@ -1,3 +1,4 @@
 player_id,first_name,last_name,fivb_id,birth_date,nationality,photo_file,shirt_name,gender
 a8a3cec8-4f94-457b-8ffc-fe8d12cd873c,Jasmine,Fleming,172222,2003-01-05,AUS,photos\a8a3cec8-4f94-457b-8ffc-fe8d12cd873c.jpg,Fleming,Female
 11c5f489-e178-440b-852c-f0f3d49362b1,Stefanie,Fejes,178070,2007-12-08,AUS,photos\11c5f489-e178-440b-852c-f0f3d49362b1.jpg,Fejes,Female
+6b966bc5-0665-4a48-b52b-b9faa887f1c0,Netitorn,Muneekul,177865,2002-01-26,THA,,Netitorn,Male

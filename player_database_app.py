@@ -18,7 +18,6 @@ DATA_DIR = "data"
 PHOTOS_DIR = os.path.join(DATA_DIR, "photos")
 PLAYERS_FILE = os.path.join(DATA_DIR, "players.csv")
 RESULTS_FILE = os.path.join(DATA_DIR, "results.csv")
-EVENTS_FILE = os.path.join(DATA_DIR, "events.csv")  # master list of events
 
 PLAYER_COLUMNS = [
     "player_id",
@@ -41,15 +40,6 @@ RESULT_COLUMNS = [
     "points",
     "rank",
     "prize_money",
-]
-
-
-EVENT_COLUMNS = [
-    "event_id",
-    "season",
-    "date",
-    "event_type",
-    "tournament_name",
 ]
 
 EVENT_TYPES = ["AVC", "FIVB", "AVC Multi/Zonal", "Other Multi/Zonal"]
@@ -99,103 +89,6 @@ def save_players(df):
 def save_results(df):
     ensure_dirs()
     df.to_csv(RESULTS_FILE, index=False)
-
-
-def load_events():
-    """Load master event list (events.csv). If missing, it will be created from results.csv."""
-    ensure_dirs()
-    if os.path.exists(EVENTS_FILE):
-        df = pd.read_csv(EVENTS_FILE, dtype=str)
-    else:
-        df = pd.DataFrame(columns=EVENT_COLUMNS)
-
-    # Normalize types
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-        df["season"] = df["season"].fillna("").astype(str)
-        df["event_type"] = df["event_type"].fillna("").astype(str)
-        df["tournament_name"] = df["tournament_name"].fillna("").astype(str)
-
-    return df
-
-
-def save_events(df):
-    ensure_dirs()
-    # store date as ISO string for CSV
-    df2 = df.copy()
-    if "date" in df2.columns:
-        df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
-        df2["date"] = df2["date"].apply(lambda x: x.isoformat() if pd.notna(x) and x else "")
-    df2.to_csv(EVENTS_FILE, index=False)
-
-
-def sync_events_from_results(results_df, events_df=None):
-    """Ensure events.csv contains at least all unique (season, date, event_type, tournament_name) found in results."""
-    if events_df is None:
-        events_df = load_events()
-
-    if results_df is None or results_df.empty:
-        if events_df is None or events_df.empty:
-            return pd.DataFrame(columns=EVENT_COLUMNS)
-        return events_df
-
-    # results_df date may already be date objects
-    tmp = results_df.copy()
-    tmp["date"] = pd.to_datetime(tmp["date"], errors="coerce").dt.date
-    tmp["season"] = tmp["season"].fillna("").astype(str)
-    tmp["event_type"] = tmp["event_type"].fillna("").astype(str)
-    tmp["tournament_name"] = tmp["tournament_name"].fillna("").astype(str)
-
-    unique = tmp[["season", "date", "event_type", "tournament_name"]].dropna(subset=["tournament_name"])
-    unique = unique[unique["tournament_name"].str.strip() != ""].drop_duplicates()
-
-    if events_df is None or events_df.empty:
-        base = pd.DataFrame(columns=EVENT_COLUMNS)
-    else:
-        base = events_df.copy()
-        base["date"] = pd.to_datetime(base["date"], errors="coerce").dt.date
-        base["season"] = base["season"].fillna("").astype(str)
-        base["event_type"] = base["event_type"].fillna("").astype(str)
-        base["tournament_name"] = base["tournament_name"].fillna("").astype(str)
-
-    # Build a key for matching
-    def make_key(df_):
-        return (
-            df_["season"].astype(str).fillna("").str.strip()
-            + "||"
-            + df_["event_type"].astype(str).fillna("").str.strip()
-            + "||"
-            + df_["tournament_name"].astype(str).fillna("").str.strip()
-            + "||"
-            + pd.to_datetime(df_["date"], errors="coerce").dt.date.astype(str)
-        )
-
-    base_keys = set(make_key(base)) if not base.empty else set()
-    to_add_rows = []
-    for _, r in unique.iterrows():
-        key = f"{str(r['season']).strip()}||{str(r['event_type']).strip()}||{str(r['tournament_name']).strip()}||{str(r['date'])}"
-        if key not in base_keys:
-            to_add_rows.append(
-                {
-                    "event_id": new_id(),
-                    "season": str(r["season"]).strip(),
-                    "date": r["date"],
-                    "event_type": str(r["event_type"]).strip(),
-                    "tournament_name": str(r["tournament_name"]).strip(),
-                }
-            )
-            base_keys.add(key)
-
-    if to_add_rows:
-        base = pd.concat([base, pd.DataFrame(to_add_rows)], ignore_index=True)
-
-    # Nice ordering
-    if not base.empty:
-        base["date"] = pd.to_datetime(base["date"], errors="coerce").dt.date
-        base = base.sort_values(["date", "tournament_name"], ascending=[False, True]).reset_index(drop=True)
-
-    save_events(base)
-    return base
 
 
 def new_id():
@@ -331,7 +224,6 @@ def page_add_edit_player():
 
     players_df = load_players()
     results_df = load_results()
-    events_df = sync_events_from_results(results_df)
 
     st.markdown("Use this page to **create new players** or **edit existing players**.")
 
@@ -450,90 +342,17 @@ def page_add_edit_player():
         st.subheader("Add Result for This Player")
 
         with st.form("add_result_form"):
-            # Event chooser: pick from existing master list, or type a new one
-            events_df = sync_events_from_results(results_df, events_df)
-
-            events_view = events_df.copy()
-            if not events_view.empty:
-                events_view["label"] = events_view.apply(
-                    lambda r: f"{r['date']} — {r['tournament_name']} ({r['event_type']})",
-                    axis=1
-                )
-                event_options = ["(Select existing)"] + events_view["label"].tolist()
-            else:
-                event_options = ["(Select existing)"]
-
             c1, c2, c3 = st.columns(3)
-
             with c1:
                 season = st.text_input("Season (e.g. 2025)")
-
-                selected_event_label = st.selectbox(
-                    "Existing event (optional)",
-                    event_options,
-                    index=0,
-                    help="Select an existing event so you don't need to type the tournament name every time.",
+                date_value = st.date_input(
+                    "Tournament date",
+                    value=date.today(),
                 )
-
-                # If user selects an existing event, we can auto-fill season + event type + date when blank
-                sel_event_row = None
-                if selected_event_label != "(Select existing)" and not events_view.empty:
-                    sel_event_row = events_view[events_view["label"] == selected_event_label].iloc[0]
-
             with c2:
-                new_event_name = st.text_input(
-                    "Tournament name (type new if not in list)",
-                    help="If you type here, it will override the selected event name (and will be saved as a new event if not yet in the list).",
-                )
-
-                # Date default comes from selected event (if any)
-                default_date = date.today()
-                if sel_event_row is not None and pd.notna(sel_event_row.get("date")):
-                    default_date = sel_event_row["date"]
-
-                date_value = st.date_input("Tournament date", value=default_date)
-
+                event_type = st.selectbox("Event type", EVENT_TYPES)
+                tournament_name = st.text_input("Tournament name")
             with c3:
-                # Event type default comes from selected event (if any)
-                default_event_type = EVENT_TYPES[0]
-                if sel_event_row is not None and isinstance(sel_event_row.get("event_type"), str) and sel_event_row["event_type"] in EVENT_TYPES:
-                    default_event_type = sel_event_row["event_type"]
-                event_type = st.selectbox("Event type", EVENT_TYPES, index=EVENT_TYPES.index(default_event_type))
-
-                # Tournament name chosen logic
-                if new_event_name.strip():
-                    tournament_name = new_event_name.strip()
-                elif sel_event_row is not None:
-                    tournament_name = str(sel_event_row["tournament_name"]).strip()
-                else:
-                    tournament_name = ""
-
-                # If user didn't fill season, try to take it from selected event (if any)
-                if (not str(season).strip()) and sel_event_row is not None:
-                    season = str(sel_event_row.get("season") or "").strip()
-
-                # Teammate selection from existing players
-                all_players = players_df.copy()
-                other_players = all_players[all_players["player_id"] != player_row["player_id"]]
-
-                teammate_options = ["(None)"] + [
-                    f"{r['first_name']} {r['last_name']} (FIVB: {r['fivb_id']})"
-                    for _, r in other_players.iterrows()
-                ]
-
-                teammate_label = st.selectbox("Teammate (from database)", teammate_options)
-
-                if teammate_label == "(None)":
-                    teammate = ""
-                else:
-                    teammate = teammate_label.split(" (FIVB")[0].strip()
-
-                points = st.number_input("Points", min_value=0.0, step=1.0)
-                prize_money = st.number_input("Prize money", min_value=0.0, step=100.0)
-
-            rank = st.number_input("Rank", min_value=1, step=1)
-            result_submit = st.form_submit_button("➕ Add Result")
-
                 # Teammate selection from existing players
                 all_players = players_df.copy()
                 other_players = all_players[all_players["player_id"] != player_row["player_id"]]
@@ -557,10 +376,6 @@ def page_add_edit_player():
             result_submit = st.form_submit_button("➕ Add Result")
 
         if result_submit:
-            if not str(tournament_name).strip():
-                st.error("Please select an existing event or type a tournament name.")
-                return
-
             # 1) Add result for current player (A)
             new_result_A = {
                 "result_id": new_id(),
@@ -575,10 +390,7 @@ def page_add_edit_player():
                 "prize_money": float(prize_money),
             }
 
-            results_df = pd\.concat\(\[results_df, pd\.DataFrame\(\[new_result_A\]\)\], ignore_index=True\)
-
-            # Keep master event list updated
-            events_df = sync_events_from_results(results_df, events_df)
+            results_df = pd.concat([results_df, pd.DataFrame([new_result_A])], ignore_index=True)
 
             # 2) If teammate selected, also add mirrored result for teammate (B)
             if teammate != "":
@@ -603,7 +415,6 @@ def page_add_edit_player():
                     results_df = pd.concat([results_df, pd.DataFrame([new_result_B])], ignore_index=True)
 
             save_results(results_df)
-            sync_events_from_results(results_df)
             st.success("Result added (including teammate, if selected) ✅")
             st.experimental_rerun()
 

@@ -1,11 +1,8 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, timedelta
+from datetime import datetime, date, timedelta
 import os
 import uuid
-from io import BytesIO, StringIO
-import requests
-from base64 import b64encode, b64decode
 
 # -------------------------
 # CONFIG & CONSTANTS
@@ -21,13 +18,12 @@ DATA_DIR = "data"
 PHOTOS_DIR = os.path.join(DATA_DIR, "photos")
 PLAYERS_FILE = os.path.join(DATA_DIR, "players.csv")
 RESULTS_FILE = os.path.join(DATA_DIR, "results.csv")
+EVENTS_FILE = os.path.join(DATA_DIR, "events.csv")  # master list of events
 
 PLAYER_COLUMNS = [
     "player_id",
     "first_name",
     "last_name",
-    "shirt_name",   # NEW
-    "gender",
     "fivb_id",
     "birth_date",
     "nationality",
@@ -47,84 +43,16 @@ RESULT_COLUMNS = [
     "prize_money",
 ]
 
+
+EVENT_COLUMNS = [
+    "event_id",
+    "season",
+    "date",
+    "event_type",
+    "tournament_name",
+]
+
 EVENT_TYPES = ["AVC", "FIVB", "AVC Multi/Zonal", "Other Multi/Zonal"]
-
-GENDER_OPTIONS = ["", "Male", "Female"]  # "" = not specified
-
-# -------------------------
-# GITHUB STORAGE CONFIG
-# -------------------------
-
-USE_GITHUB = False
-GH_OWNER = GH_REPO = GH_BRANCH = GH_TOKEN = None
-
-try:
-    if "github" in st.secrets:
-        gh_cfg = st.secrets["github"]
-        GH_TOKEN = gh_cfg.get("token")
-        GH_OWNER = gh_cfg.get("repo_owner")
-        GH_REPO = gh_cfg.get("repo_name")
-        GH_BRANCH = gh_cfg.get("branch", "main")
-        if GH_TOKEN and GH_OWNER and GH_REPO:
-            USE_GITHUB = True
-except Exception:
-    USE_GITHUB = False
-
-
-def github_headers():
-    return {
-        "Authorization": f"Bearer {GH_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
-
-
-def github_get_file(path: str):
-    """Get a file from GitHub repo via contents API.
-       Returns (bytes_content, sha) or (None, None) if not found/error.
-    """
-    if not USE_GITHUB:
-        return None, None
-
-    path = path.replace("\\", "/")
-    url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/contents/{path}"
-    params = {}
-    if GH_BRANCH:
-        params["ref"] = GH_BRANCH
-
-    resp = requests.get(url, headers=github_headers(), params=params)
-    if resp.status_code == 200:
-        data = resp.json()
-        content = b64decode(data["content"])
-        sha = data["sha"]
-        return content, sha
-    elif resp.status_code == 404:
-        return None, None
-    else:
-        st.error(f"GitHub read error for {path}: {resp.status_code} {resp.text}")
-        return None, None
-
-
-def github_put_file(path: str, content_bytes: bytes, message: str):
-    """Create or update a file in the GitHub repo."""
-    if not USE_GITHUB:
-        return
-
-    path = path.replace("\\", "/")
-    url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/contents/{path}"
-
-    # Check if file exists to get sha
-    existing_content, existing_sha = github_get_file(path)
-    payload = {
-        "message": message,
-        "content": b64encode(content_bytes).decode("utf-8"),
-        "branch": GH_BRANCH or "main",
-    }
-    if existing_content is not None and existing_sha:
-        payload["sha"] = existing_sha
-
-    resp = requests.put(url, headers=github_headers(), json=payload)
-    if resp.status_code not in (200, 201):
-        st.error(f"GitHub write error for {path}: {resp.status_code} {resp.text}")
 
 
 # -------------------------
@@ -132,49 +60,27 @@ def github_put_file(path: str, content_bytes: bytes, message: str):
 # -------------------------
 
 def ensure_dirs():
-    """For local mode only (no effect when using GitHub)."""
-    if USE_GITHUB:
-        return
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(PHOTOS_DIR, exist_ok=True)
 
 
 def load_players():
-    if USE_GITHUB:
-        content, _ = github_get_file(PLAYERS_FILE)
-        if content is None:
-            df = pd.DataFrame(columns=PLAYER_COLUMNS)
-        else:
-            df = pd.read_csv(StringIO(content.decode("utf-8")), dtype=str)
+    ensure_dirs()
+    if os.path.exists(PLAYERS_FILE):
+        df = pd.read_csv(PLAYERS_FILE, dtype=str)
     else:
-        ensure_dirs()
-        if os.path.exists(PLAYERS_FILE):
-            df = pd.read_csv(PLAYERS_FILE, dtype=str)
-        else:
-            df = pd.DataFrame(columns=PLAYER_COLUMNS)
-
-    # Ensure all columns exist (for old CSVs)
-    for col in PLAYER_COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-
-    df = df.fillna("")
+        df = pd.DataFrame(columns=PLAYER_COLUMNS)
+    if "birth_date" in df.columns:
+        df["birth_date"] = df["birth_date"].fillna("")
     return df
 
 
 def load_results():
-    if USE_GITHUB:
-        content, _ = github_get_file(RESULTS_FILE)
-        if content is None:
-            df = pd.DataFrame(columns=RESULT_COLUMNS)
-        else:
-            df = pd.read_csv(StringIO(content.decode("utf-8")), dtype=str)
+    ensure_dirs()
+    if os.path.exists(RESULTS_FILE):
+        df = pd.read_csv(RESULTS_FILE, dtype=str)
     else:
-        ensure_dirs()
-        if os.path.exists(RESULTS_FILE):
-            df = pd.read_csv(RESULTS_FILE, dtype=str)
-        else:
-            df = pd.DataFrame(columns=RESULT_COLUMNS)
+        df = pd.DataFrame(columns=RESULT_COLUMNS)
 
     if not df.empty:
         for col in ["points", "prize_money"]:
@@ -186,21 +92,110 @@ def load_results():
 
 
 def save_players(df):
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    if USE_GITHUB:
-        github_put_file(PLAYERS_FILE, csv_bytes, "Update players.csv from Streamlit app")
-    else:
-        ensure_dirs()
-        df.to_csv(PLAYERS_FILE, index=False)
+    ensure_dirs()
+    df.to_csv(PLAYERS_FILE, index=False)
 
 
 def save_results(df):
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    if USE_GITHUB:
-        github_put_file(RESULTS_FILE, csv_bytes, "Update results.csv from Streamlit app")
+    ensure_dirs()
+    df.to_csv(RESULTS_FILE, index=False)
+
+
+def load_events():
+    """Load master event list (events.csv). If missing, it will be created from results.csv."""
+    ensure_dirs()
+    if os.path.exists(EVENTS_FILE):
+        df = pd.read_csv(EVENTS_FILE, dtype=str)
     else:
-        ensure_dirs()
-        df.to_csv(RESULTS_FILE, index=False)
+        df = pd.DataFrame(columns=EVENT_COLUMNS)
+
+    # Normalize types
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        df["season"] = df["season"].fillna("").astype(str)
+        df["event_type"] = df["event_type"].fillna("").astype(str)
+        df["tournament_name"] = df["tournament_name"].fillna("").astype(str)
+
+    return df
+
+
+def save_events(df):
+    ensure_dirs()
+    # store date as ISO string for CSV
+    df2 = df.copy()
+    if "date" in df2.columns:
+        df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
+        df2["date"] = df2["date"].apply(lambda x: x.isoformat() if pd.notna(x) and x else "")
+    df2.to_csv(EVENTS_FILE, index=False)
+
+
+def sync_events_from_results(results_df, events_df=None):
+    """Ensure events.csv contains at least all unique (season, date, event_type, tournament_name) found in results."""
+    if events_df is None:
+        events_df = load_events()
+
+    if results_df is None or results_df.empty:
+        if events_df is None or events_df.empty:
+            return pd.DataFrame(columns=EVENT_COLUMNS)
+        return events_df
+
+    # results_df date may already be date objects
+    tmp = results_df.copy()
+    tmp["date"] = pd.to_datetime(tmp["date"], errors="coerce").dt.date
+    tmp["season"] = tmp["season"].fillna("").astype(str)
+    tmp["event_type"] = tmp["event_type"].fillna("").astype(str)
+    tmp["tournament_name"] = tmp["tournament_name"].fillna("").astype(str)
+
+    unique = tmp[["season", "date", "event_type", "tournament_name"]].dropna(subset=["tournament_name"])
+    unique = unique[unique["tournament_name"].str.strip() != ""].drop_duplicates()
+
+    if events_df is None or events_df.empty:
+        base = pd.DataFrame(columns=EVENT_COLUMNS)
+    else:
+        base = events_df.copy()
+        base["date"] = pd.to_datetime(base["date"], errors="coerce").dt.date
+        base["season"] = base["season"].fillna("").astype(str)
+        base["event_type"] = base["event_type"].fillna("").astype(str)
+        base["tournament_name"] = base["tournament_name"].fillna("").astype(str)
+
+    # Build a key for matching
+    def make_key(df_):
+        return (
+            df_["season"].astype(str).fillna("").str.strip()
+            + "||"
+            + df_["event_type"].astype(str).fillna("").str.strip()
+            + "||"
+            + df_["tournament_name"].astype(str).fillna("").str.strip()
+            + "||"
+            + pd.to_datetime(df_["date"], errors="coerce").dt.date.astype(str)
+        )
+
+    base_keys = set(make_key(base)) if not base.empty else set()
+    to_add_rows = []
+    for _, r in unique.iterrows():
+        key = f"{str(r['season']).strip()}||{str(r['event_type']).strip()}||{str(r['tournament_name']).strip()}||{str(r['date'])}"
+        if key not in base_keys:
+            to_add_rows.append(
+                {
+                    "event_id": new_id(),
+                    "season": str(r["season"]).strip(),
+                    "date": r["date"],
+                    "event_type": str(r["event_type"]).strip(),
+                    "tournament_name": str(r["tournament_name"]).strip(),
+                }
+            )
+            base_keys.add(key)
+
+    if to_add_rows:
+        base = pd.concat([base, pd.DataFrame(to_add_rows)], ignore_index=True)
+
+    # Nice ordering
+    if not base.empty:
+        base["date"] = pd.to_datetime(base["date"], errors="coerce").dt.date
+        base = base.sort_values(["date", "tournament_name"], ascending=[False, True]).reset_index(drop=True)
+
+    save_events(base)
+    return base
 
 
 def new_id():
@@ -212,13 +207,6 @@ def player_display_name(row):
     if isinstance(row.get("fivb_id"), str) and row["fivb_id"].strip():
         return f"{base} (FIVB: {row['fivb_id']})"
     return base
-
-
-def shirt_or_name(row):
-    s = str(row.get("shirt_name", "")).strip()
-    if s:
-        return s
-    return f"{row['first_name']} {row['last_name']}".strip()
 
 
 def get_player_by_id(players_df, player_id):
@@ -343,6 +331,7 @@ def page_add_edit_player():
 
     players_df = load_players()
     results_df = load_results()
+    events_df = sync_events_from_results(results_df)
 
     st.markdown("Use this page to **create new players** or **edit existing players**.")
 
@@ -366,7 +355,7 @@ def page_add_edit_player():
 
     st.subheader("Player Information")
     with st.form("player_form"):
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
             first_name = st.text_input(
@@ -378,16 +367,6 @@ def page_add_edit_player():
                 value=player_row["last_name"] if player_row is not None else "",
             )
         with col2:
-            shirt_name = st.text_input(
-                "Shirt name (short name)",
-                value=player_row["shirt_name"] if player_row is not None else "",
-                help="Name used on ranking lists, e.g. 'LEE J.'",
-            )
-            gender_default = player_row["gender"] if player_row is not None else ""
-            if gender_default not in GENDER_OPTIONS:
-                gender_default = ""
-            gender = st.selectbox("Gender", GENDER_OPTIONS, index=GENDER_OPTIONS.index(gender_default))
-        with col3:
             fivb_id = st.text_input(
                 "FIVB ID",
                 value=player_row["fivb_id"] if player_row is not None else "",
@@ -396,16 +375,17 @@ def page_add_edit_player():
                 "Nationality (e.g. THA, CHN, JPN)",
                 value=player_row["nationality"] if player_row is not None else "",
             )
-        with col4:
+        with col3:
             birth_date_str = st.text_input(
                 "Birth date (YYYY-MM-DD)",
                 value=player_row["birth_date"] if player_row is not None else "",
                 help="Free text, but recommended format: YYYY-MM-DD",
             )
-            photo_file = st.file_uploader(
-                "Upload Photo ID (optional)",
-                type=["png", "jpg", "jpeg"],
-            )
+
+        photo_file = st.file_uploader(
+            "Upload Photo ID (optional)",
+            type=["png", "jpg", "jpeg"],
+        )
 
         submitted = st.form_submit_button("💾 Save Player")
 
@@ -414,33 +394,24 @@ def page_add_edit_player():
             st.error("Please enter at least a first name or last name.")
             return
 
-        # New player
+        ensure_dirs()
+
         if player_row is None:
+            # New player
             player_id = new_id()
             photo_path = ""
             if photo_file is not None:
                 ext = os.path.splitext(photo_file.name)[1]
                 photo_filename = f"{player_id}{ext}"
-                photo_path = f"photos/{photo_filename}"
-
-                if USE_GITHUB:
-                    github_put_file(
-                        os.path.join(DATA_DIR, photo_path),
-                        bytes(photo_file.getbuffer()),
-                        f"Upload photo for player {player_id}",
-                    )
-                else:
-                    ensure_dirs()
-                    with open(os.path.join(DATA_DIR, photo_path), "wb") as f:
-                        f.write(photo_file.getbuffer())
+                photo_path = os.path.join("photos", photo_filename)
+                with open(os.path.join(DATA_DIR, photo_path), "wb") as f:
+                    f.write(photo_file.getbuffer())
 
             new_player = pd.DataFrame(
                 [{
                     "player_id": player_id,
                     "first_name": first_name.strip(),
                     "last_name": last_name.strip(),
-                    "shirt_name": shirt_name.strip(),
-                    "gender": gender.strip(),
                     "fivb_id": fivb_id.strip(),
                     "birth_date": birth_date_str.strip(),
                     "nationality": nationality.strip(),
@@ -459,23 +430,12 @@ def page_add_edit_player():
             if photo_file is not None:
                 ext = os.path.splitext(photo_file.name)[1]
                 photo_filename = f"{player_row['player_id']}{ext}"
-                photo_path = f"photos/{photo_filename}"
-
-                if USE_GITHUB:
-                    github_put_file(
-                        os.path.join(DATA_DIR, photo_path),
-                        bytes(photo_file.getbuffer()),
-                        f"Upload/update photo for player {player_row['player_id']}",
-                    )
-                else:
-                    ensure_dirs()
-                    with open(os.path.join(DATA_DIR, photo_path), "wb") as f:
-                        f.write(photo_file.getbuffer())
+                photo_path = os.path.join("photos", photo_filename)
+                with open(os.path.join(DATA_DIR, photo_path), "wb") as f:
+                    f.write(photo_file.getbuffer())
 
             players_df.loc[idx, "first_name"] = first_name.strip()
             players_df.loc[idx, "last_name"] = last_name.strip()
-            players_df.loc[idx, "shirt_name"] = shirt_name.strip()
-            players_df.loc[idx, "gender"] = gender.strip()
             players_df.loc[idx, "fivb_id"] = fivb_id.strip()
             players_df.loc[idx, "birth_date"] = birth_date_str.strip()
             players_df.loc[idx, "nationality"] = nationality.strip()
@@ -490,17 +450,90 @@ def page_add_edit_player():
         st.subheader("Add Result for This Player")
 
         with st.form("add_result_form"):
+            # Event chooser: pick from existing master list, or type a new one
+            events_df = sync_events_from_results(results_df, events_df)
+
+            events_view = events_df.copy()
+            if not events_view.empty:
+                events_view["label"] = events_view.apply(
+                    lambda r: f"{r['date']} — {r['tournament_name']} ({r['event_type']})",
+                    axis=1
+                )
+                event_options = ["(Select existing)"] + events_view["label"].tolist()
+            else:
+                event_options = ["(Select existing)"]
+
             c1, c2, c3 = st.columns(3)
+
             with c1:
                 season = st.text_input("Season (e.g. 2025)")
-                date_value = st.date_input(
-                    "Tournament date",
-                    value=date.today(),
+
+                selected_event_label = st.selectbox(
+                    "Existing event (optional)",
+                    event_options,
+                    index=0,
+                    help="Select an existing event so you don't need to type the tournament name every time.",
                 )
+
+                # If user selects an existing event, we can auto-fill season + event type + date when blank
+                sel_event_row = None
+                if selected_event_label != "(Select existing)" and not events_view.empty:
+                    sel_event_row = events_view[events_view["label"] == selected_event_label].iloc[0]
+
             with c2:
-                event_type = st.selectbox("Event type", EVENT_TYPES)
-                tournament_name = st.text_input("Tournament name")
+                new_event_name = st.text_input(
+                    "Tournament name (type new if not in list)",
+                    help="If you type here, it will override the selected event name (and will be saved as a new event if not yet in the list).",
+                )
+
+                # Date default comes from selected event (if any)
+                default_date = date.today()
+                if sel_event_row is not None and pd.notna(sel_event_row.get("date")):
+                    default_date = sel_event_row["date"]
+
+                date_value = st.date_input("Tournament date", value=default_date)
+
             with c3:
+                # Event type default comes from selected event (if any)
+                default_event_type = EVENT_TYPES[0]
+                if sel_event_row is not None and isinstance(sel_event_row.get("event_type"), str) and sel_event_row["event_type"] in EVENT_TYPES:
+                    default_event_type = sel_event_row["event_type"]
+                event_type = st.selectbox("Event type", EVENT_TYPES, index=EVENT_TYPES.index(default_event_type))
+
+                # Tournament name chosen logic
+                if new_event_name.strip():
+                    tournament_name = new_event_name.strip()
+                elif sel_event_row is not None:
+                    tournament_name = str(sel_event_row["tournament_name"]).strip()
+                else:
+                    tournament_name = ""
+
+                # If user didn't fill season, try to take it from selected event (if any)
+                if (not str(season).strip()) and sel_event_row is not None:
+                    season = str(sel_event_row.get("season") or "").strip()
+
+                # Teammate selection from existing players
+                all_players = players_df.copy()
+                other_players = all_players[all_players["player_id"] != player_row["player_id"]]
+
+                teammate_options = ["(None)"] + [
+                    f"{r['first_name']} {r['last_name']} (FIVB: {r['fivb_id']})"
+                    for _, r in other_players.iterrows()
+                ]
+
+                teammate_label = st.selectbox("Teammate (from database)", teammate_options)
+
+                if teammate_label == "(None)":
+                    teammate = ""
+                else:
+                    teammate = teammate_label.split(" (FIVB")[0].strip()
+
+                points = st.number_input("Points", min_value=0.0, step=1.0)
+                prize_money = st.number_input("Prize money", min_value=0.0, step=100.0)
+
+            rank = st.number_input("Rank", min_value=1, step=1)
+            result_submit = st.form_submit_button("➕ Add Result")
+
                 # Teammate selection from existing players
                 all_players = players_df.copy()
                 other_players = all_players[all_players["player_id"] != player_row["player_id"]]
@@ -524,6 +557,10 @@ def page_add_edit_player():
             result_submit = st.form_submit_button("➕ Add Result")
 
         if result_submit:
+            if not str(tournament_name).strip():
+                st.error("Please select an existing event or type a tournament name.")
+                return
+
             # 1) Add result for current player (A)
             new_result_A = {
                 "result_id": new_id(),
@@ -538,16 +575,19 @@ def page_add_edit_player():
                 "prize_money": float(prize_money),
             }
 
-            results_df = pd.concat([results_df, pd.DataFrame([new_result_A])], ignore_index=True)
+            results_df = pd\.concat\(\[results_df, pd\.DataFrame\(\[new_result_A\]\)\], ignore_index=True\)
+
+            # Keep master event list updated
+            events_df = sync_events_from_results(results_df, events_df)
 
             # 2) If teammate selected, also add mirrored result for teammate (B)
             if teammate != "":
                 full_name_A = f"{player_row['first_name']} {player_row['last_name']}"
-                teammate_row_df = players_df[
+                teammate_row = players_df[
                     (players_df["first_name"] + " " + players_df["last_name"]) == teammate
                 ]
-                if not teammate_row_df.empty:
-                    teammate_id = teammate_row_df.iloc[0]["player_id"]
+                if not teammate_row.empty:
+                    teammate_id = teammate_row.iloc[0]["player_id"]
                     new_result_B = {
                         "result_id": new_id(),
                         "player_id": teammate_id,
@@ -563,8 +603,9 @@ def page_add_edit_player():
                     results_df = pd.concat([results_df, pd.DataFrame([new_result_B])], ignore_index=True)
 
             save_results(results_df)
+            sync_events_from_results(results_df)
             st.success("Result added (including teammate, if selected) ✅")
-            st.rerun()
+            st.experimental_rerun()
 
         st.markdown("### Existing Results for This Player")
 
@@ -590,16 +631,6 @@ def page_add_edit_player():
                 idx = result_choices.index(selected_edit)
                 edit_row = player_results_sorted.iloc[idx]
                 res_id = edit_row["result_id"]
-
-                # Keep original values for mirrored update
-                orig_season = edit_row["season"]
-                orig_date = edit_row["date"]
-                orig_event_type = edit_row["event_type"]
-                orig_tournament = edit_row["tournament_name"]
-                orig_teammate = edit_row["teammate"]
-                orig_points = float(edit_row["points"])
-                orig_rank = float(edit_row["rank"])
-                orig_prize = float(edit_row["prize_money"])
 
                 st.markdown("### Edit Result Details")
                 with st.form("edit_result_form"):
@@ -649,7 +680,6 @@ def page_add_edit_player():
                     submitted_edit = st.form_submit_button("💾 Save Changes")
 
                 if submitted_edit:
-                    # Update this player's result
                     mask = results_df["result_id"] == res_id
                     results_df.loc[mask, "season"] = season_edit
                     results_df.loc[mask, "date"] = date_edit
@@ -660,42 +690,9 @@ def page_add_edit_player():
                     results_df.loc[mask, "rank"] = rank_edit
                     results_df.loc[mask, "prize_money"] = prize_edit
 
-                    # Try to update teammate's mirrored result if teammate not changed
-                    if orig_teammate and orig_teammate == teammate_edit:
-                        tm_row = players_df[
-                            (players_df["first_name"] + " " + players_df["last_name"]) == orig_teammate
-                        ]
-                        if not tm_row.empty:
-                            tm_id = tm_row.iloc[0]["player_id"]
-                            full_name_A = f"{player_row['first_name']} {player_row['last_name']}"
-
-                            mirrored_mask = (
-                                (results_df["player_id"] == tm_id) &
-                                (results_df["teammate"] == full_name_A) &
-                                (results_df["season"] == orig_season) &
-                                (pd.to_datetime(results_df["date"], errors="coerce").dt.date == orig_date) &
-                                (results_df["event_type"] == orig_event_type) &
-                                (results_df["tournament_name"] == orig_tournament) &
-                                (pd.to_numeric(results_df["points"], errors="coerce") == orig_points) &
-                                (pd.to_numeric(results_df["rank"], errors="coerce") == orig_rank) &
-                                (pd.to_numeric(results_df["prize_money"], errors="coerce") == orig_prize)
-                            )
-
-                            if mirrored_mask.any():
-                                results_df.loc[mirrored_mask, "season"] = season_edit
-                                results_df.loc[mirrored_mask, "date"] = date_edit
-                                results_df.loc[mirrored_mask, "event_type"] = event_type_edit
-                                results_df.loc[mirrored_mask, "tournament_name"] = tournament_edit
-                                # teammate for mirrored side stays as this player
-                                results_df.loc[mirrored_mask, "points"] = points_edit
-                                results_df.loc[mirrored_mask, "rank"] = rank_edit
-                                results_df.loc[mirrored_mask, "prize_money"] = prize_edit
-
                     save_results(results_df)
                     st.success("Result updated ✅")
-                    st.rerun()
-
-
+                    st.experimental_rerun()
 # -------------------------
 # PAGE: IMPORT FROM EXCEL
 # -------------------------
@@ -709,8 +706,6 @@ Upload **one Excel file** with **one sheet** containing columns:
 
 - `first_name`
 - `last_name`
-- `shirt_name`
-- `gender` (Male / Female)
 - `fivb_id`
 - `birth_date` (YYYY-MM-DD)
 - `nationality`
@@ -745,8 +740,6 @@ Players will be created or matched using **FIVB ID**.
     required_cols = [
         "first_name",
         "last_name",
-        "shirt_name",
-        "gender",
         "fivb_id",
         "birth_date",
         "nationality",
@@ -793,8 +786,6 @@ Players will be created or matched using **FIVB ID**.
                         "player_id": pid,
                         "first_name": str(row["first_name"]).strip(),
                         "last_name": str(row["last_name"]).strip(),
-                        "shirt_name": str(row["shirt_name"]).strip(),
-                        "gender": str(row["gender"]).strip(),
                         "fivb_id": fivb,
                         "birth_date": str(row["birth_date"]).strip(),
                         "nationality": str(row["nationality"]).strip(),
@@ -868,26 +859,16 @@ def page_player_search():
     col1, col2 = st.columns([2, 1])
     with col1:
         st.subheader(f"{row['first_name']} {row['last_name']}")
-        st.write(f"**Shirt name:** {row['shirt_name']}")
-        st.write(f"**Gender:** {row['gender']}")
         st.write(f"**FIVB ID:** {row['fivb_id']}")
         st.write(f"**Birth date:** {row['birth_date']}")
         st.write(f"**Nationality:** {row['nationality']}")
     with col2:
         if isinstance(row["photo_file"], str) and row["photo_file"]:
-            photo_rel = row["photo_file"]
-            local_path = os.path.join(DATA_DIR, photo_rel)
-            if USE_GITHUB:
-                content, _ = github_get_file(local_path)
-                if content is not None:
-                    st.image(content, caption="Photo ID", use_container_width=True)
-                else:
-                    st.caption("Photo path saved but file not found in GitHub.")
+            photo_path = os.path.join(DATA_DIR, row["photo_file"])
+            if os.path.exists(photo_path):
+                st.image(photo_path, caption="Photo ID", use_container_width=True)
             else:
-                if os.path.exists(local_path):
-                    st.image(local_path, caption="Photo ID", use_container_width=True)
-                else:
-                    st.caption("Photo path saved but file not found.")
+                st.caption("Photo path saved but file not found.")
 
     st.markdown("### Results history")
     player_results = results_df[results_df["player_id"] == player_id]
@@ -897,8 +878,6 @@ def page_player_search():
         display_cols = [c for c in player_results.columns if c not in ["result_id", "player_id"]]
         player_results = player_results.sort_values("date", ascending=False)
         st.dataframe(player_results[display_cols].reset_index(drop=True), use_container_width=True)
-
-
 # -------------------------
 # PAGE: RANKING CALCULATOR
 # -------------------------
@@ -983,10 +962,8 @@ def page_ranking_calculator():
         st.dataframe(wr[wr_display_cols].reset_index(drop=True), use_container_width=True)
     else:
         st.info("No results within this period.")
-
-
 # -------------------------
-# PAGE: TEAM COMBINER (Single Team)
+# PAGE: TEAM COMBINER
 # -------------------------
 
 def page_team_combiner():
@@ -1031,19 +1008,19 @@ def page_team_combiner():
     mode = st.radio(
         "Point calculation period",
         ["Last 365 days from reference date", "Custom date range"],
-        key="team_mode_single",
+        key="team_mode",
     )
 
     if mode == "Last 365 days from reference date":
-        ref_date = st.date_input("Reference date", value=date.today(), key="team_ref_single")
+        ref_date = st.date_input("Reference date", value=date.today(), key="team_ref_date")
         res1 = calculate_player_points(results_df, p1_row["player_id"], mode="365", ref_date=ref_date)
         res2 = calculate_player_points(results_df, p2_row["player_id"], mode="365", ref_date=ref_date)
     else:
         c1, c2 = st.columns(2)
         with c1:
-            start_date = st.date_input("Start date", value=date.today() - timedelta(days=365), key="team_start_single")
+            start_date = st.date_input("Start date", value=date.today() - timedelta(days=365), key="team_start_date")
         with c2:
-            end_date = st.date_input("End date", value=date.today(), key="team_end_single")
+            end_date = st.date_input("End date", value=date.today(), key="team_end_date")
         if start_date > end_date:
             st.error("Start date must be before end date.")
             return
@@ -1081,543 +1058,42 @@ def page_team_combiner():
     else:
         st.info("No selected results for Player B in this period.")
 
+    st.markdown("---")
+    st.markdown("### Tournaments where they appear as teammates (from perspective of each)")
 
-# -------------------------
-# PAGE: MULTI-TEAM REPORT (up to 24 teams, Excel)
-# -------------------------
+    p1_results = results_df[results_df["player_id"] == p1_row["player_id"]]
+    p2_results = results_df[results_df["player_id"] == p2_row["player_id"]]
 
-def page_multi_team_report():
-    st.title("📑 Multi-Team Report (up to 24 teams)")
+    nameA = f"{p1_row['first_name']} {p1_row['last_name']}".strip()
+    nameB = f"{p2_row['first_name']} {p2_row['last_name']}".strip()
 
-    players_df = load_players()
-    results_df = load_results()
+    together_a = p1_results[p1_results["teammate"].str.contains(nameB, na=False)]
+    together_b = p2_results[p2_results["teammate"].str.contains(nameA, na=False)]
 
-    if len(players_df) < 2:
-        st.info("Need at least 2 players in the database.")
-        return
-
-    players_df["display"] = players_df.apply(player_display_name, axis=1)
-    players_df = players_df.sort_values("display")
-
-    st.markdown("Select up to **24 teams** and generate a ranking report in Excel.")
-
-    competition_name = st.text_input("Competition name", value="")
-    competition_date = st.date_input("Competition date", value=date.today())
-
-    num_teams = st.number_input("Number of teams", min_value=1, max_value=24, value=8, step=1)
-
-    mode = st.radio(
-        "Point calculation period",
-        ["Last 365 days from reference date", "Custom date range"],
-        key="team_mode_multi",
-    )
-
-    if mode == "Last 365 days from reference date":
-        ref_date = st.date_input("Reference date", value=date.today(), key="team_ref_multi")
-        start_date = None
-        end_date = None
+    if together_a.empty and together_b.empty:
+        st.info("No tournaments found where they are listed as teammates (based on 'teammate' name text).")
     else:
-        c1, c2 = st.columns(2)
-        with c1:
-            start_date = st.date_input("Start date", value=date.today() - timedelta(days=365), key="team_start_multi")
-        with c2:
-            end_date = st.date_input("End date", value=date.today(), key="team_end_multi")
-        if start_date > end_date:
-            st.error("Start date must be before end date.")
-            return
-        ref_date = None
-
-    teams = []
-    st.markdown("### Team selection")
-
-    # For caching player results so we don't recalc many times
-    player_points_cache = {}
-
-    for i in range(int(num_teams)):
-        st.markdown(f"#### Team {i+1}")
-        c1, c2 = st.columns(2)
-        with c1:
-            p1_label = st.selectbox(
-                f"Player A – Team {i+1}",
-                ["(None)"] + players_df["display"].tolist(),
-                key=f"multi_p1_{i}",
-            )
-        with c2:
-            p2_label = st.selectbox(
-                f"Player B – Team {i+1}",
-                ["(None)"] + players_df["display"].tolist(),
-                key=f"multi_p2_{i}",
-            )
-
-        if p1_label == "(None)" or p2_label == "(None)":
-            continue
-        if p1_label == p2_label:
-            st.warning(f"Team {i+1}: Player A and B must be different. This team will be ignored.")
-            continue
-
-        p1_row = players_df[players_df["display"] == p1_label].iloc[0]
-        p2_row = players_df[players_df["display"] == p2_label].iloc[0]
-
-        teams.append((i+1, p1_row, p2_row))
-
-    if not teams:
-        st.info("No valid teams selected yet.")
-        return
-
-    if st.button("📥 Generate Multi-Team Excel Report"):
-        # Calculate for each player, cache by player_id
-        def get_pts(pid):
-            if pid in player_points_cache:
-                return player_points_cache[pid]
-            if mode == "Last 365 days from reference date":
-                res = calculate_player_points(results_df, pid, mode="365", ref_date=ref_date)
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown(f"**View from {nameA}'s results**")
+            if not together_a.empty:
+                colsA = [c for c in together_a.columns if c not in ['result_id', 'player_id']]
+                st.dataframe(together_a.sort_values('date', ascending=False)[colsA], use_container_width=True)
             else:
-                res = calculate_player_points(results_df, pid, mode="custom",
-                                              start_date=start_date, end_date=end_date)
-            player_points_cache[pid] = res
-            return res
-
-        team_rows = []
-        unique_players = {}  # player_id -> (row, points_result)
-
-        for team_no, p1_row, p2_row in teams:
-            p1_id = p1_row["player_id"]
-            p2_id = p2_row["player_id"]
-
-            res1 = get_pts(p1_id)
-            res2 = get_pts(p2_id)
-
-            # Keep in map for breakdown
-            unique_players[p1_id] = (p1_row, res1)
-            unique_players[p2_id] = (p2_row, res2)
-
-            team_total = res1["total_points"] + res2["total_points"]
-
-            nat = p1_row["nationality"]  # both same as per your rule
-            team_name = f"{shirt_or_name(p1_row)} / {shirt_or_name(p2_row)}"
-
-            team_rows.append({
-                "Team No": team_no,
-                "Nationality": nat,
-                "Team Name": team_name,
-                "Player A AVC Points": res1["bucket1_points"],
-                "Player A FIVB Points": res1["bucket2_points"],
-                "Player B AVC Points": res2["bucket1_points"],
-                "Player B FIVB Points": res2["bucket2_points"],
-                "Team Total Points": team_total,
-            })
-
-        df_teams = pd.DataFrame(team_rows)
-        if df_teams.empty:
-            st.warning("No teams to include in report.")
-            return
-
-        df_teams = df_teams.sort_values("Team Total Points", ascending=False).reset_index(drop=True)
-        df_teams.insert(0, "Position", range(1, len(df_teams) + 1))
-
-        # Create Excel in memory
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            # TAB 1: Entry List
-            sheet_name1 = "Entry List"
-            df_teams.to_excel(writer, sheet_name=sheet_name1, index=False, startrow=4)
-
-            wb = writer.book
-            ws1 = wb[sheet_name1]
-
-            # Header rows for logos & text
-            ws1["A1"] = ""  # left logo placeholder
-            ws1["I1"] = ""  # right logo placeholder
-
-            ws1["C1"] = competition_name
-            ws1["C2"] = competition_date.isoformat()
-            ws1["C3"] = f"Confirmed Entry List ({len(df_teams)} Teams)"
-
-            # TAB 2: Breakdown
-            sheet_name2 = "Breakdown"
-            ws2 = wb.create_sheet(title=sheet_name2)
-
-            row_idx = 1
-            for pid, (prow, pres) in unique_players.items():
-                name = f"{prow['first_name']} {prow['last_name']}"
-                nat = prow["nationality"]
-                gender = prow["gender"]
-
-                # Spacer row
-                if row_idx > 1:
-                    row_idx += 1
-
-                ws2.cell(row=row_idx, column=1, value=f"{name} ({nat}, {gender})")
-                row_idx += 1
-
-                selected = pres["selected_results"].copy()
-                if selected.empty:
-                    ws2.cell(row=row_idx, column=1, value="No selected results in this period.")
-                    row_idx += 1
-                    continue
-
-                # AVC side = AVC + AVC MZ
-                avc_side = selected[selected["event_type"].isin(["AVC", "AVC Multi/Zonal"])]
-                fivb_side = selected[selected["event_type"].isin(["FIVB", "Other Multi/Zonal"])]
-
-                # AVC section
-                ws2.cell(row=row_idx, column=1, value="AVC Side (Best 4)")
-                row_idx += 1
-                header = ["Season", "Date", "Event Type", "Tournament", "Teammate", "Points", "Rank", "Prize Money"]
-                for col_idx, h in enumerate(header, start=1):
-                    ws2.cell(row=row_idx, column=col_idx, value=h)
-                row_idx += 1
-
-                if avc_side.empty:
-                    ws2.cell(row=row_idx, column=1, value="(No AVC-side events selected)")
-                    row_idx += 1
-                else:
-                    avc_side = avc_side.sort_values("points", ascending=False)
-                    for _, r in avc_side.iterrows():
-                        ws2.cell(row=row_idx, column=1, value=r["season"])
-                        ws2.cell(row=row_idx, column=2, value=str(r["date"]))
-                        ws2.cell(row=row_idx, column=3, value=r["event_type"])
-                        ws2.cell(row=row_idx, column=4, value=r["tournament_name"])
-                        ws2.cell(row=row_idx, column=5, value=r["teammate"])
-                        ws2.cell(row=row_idx, column=6, value=float(r["points"]))
-                        ws2.cell(row=row_idx, column=7, value=float(r["rank"]))
-                        ws2.cell(row=row_idx, column=8, value=float(r["prize_money"]))
-                        row_idx += 1
-
-                # FIVB section
-                row_idx += 1
-                ws2.cell(row=row_idx, column=1, value="FIVB Side (Best 4)")
-                row_idx += 1
-                for col_idx, h in enumerate(header, start=1):
-                    ws2.cell(row=row_idx, column=col_idx, value=h)
-                row_idx += 1
-
-                if fivb_side.empty:
-                    ws2.cell(row=row_idx, column=1, value="(No FIVB-side events selected)")
-                    row_idx += 1
-                else:
-                    fivb_side = fivb_side.sort_values("points", ascending=False)
-                    for _, r in fivb_side.iterrows():
-                        ws2.cell(row=row_idx, column=1, value=r["season"])
-                        ws2.cell(row=row_idx, column=2, value=str(r["date"]))
-                        ws2.cell(row=row_idx, column=3, value=r["event_type"])
-                        ws2.cell(row=row_idx, column=4, value=r["tournament_name"])
-                        ws2.cell(row=row_idx, column=5, value=r["teammate"])
-                        ws2.cell(row=row_idx, column=6, value=float(r["points"]))
-                        ws2.cell(row=row_idx, column=7, value=float(r["rank"]))
-                        ws2.cell(row=row_idx, column=8, value=float(r["prize_money"]))
-                        row_idx += 1
-
-        output.seek(0)
-        st.download_button(
-            label="⬇️ Download Excel Report",
-            data=output,
-            file_name="confirmed_entry_list.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-
-# -------------------------
-# PAGE: AVC RANKINGS (MEN & WOMEN) – FANCY CARDS
-# -------------------------
-
-def page_avc_rankings():
-    st.title("🏆 AVC Rankings")
-
-    # ----- CSS styling for row layout -----
-    st.markdown("""
-    <style>
-    .rank-card {
-        border: 1px solid #e2e2e2;
-        border-radius: 10px;
-        margin: 10px 0;
-        overflow: hidden;
-    }
-    .rank-summary {
-        display: flex;
-        padding: 12px;
-        align-items: center;
-        cursor: pointer;
-        background-color: #fafafa;
-    }
-    .rank-summary:hover {
-        background-color: #eef3ff;
-    }
-    .rank-num {
-        width: 40px;
-        font-weight: 700;
-        font-size: 18px;
-        color: #003b9b;
-    }
-    .rank-nat {
-        width: 60px;
-        font-weight: 600;
-        font-size: 16px;
-        color: #444;
-    }
-    .rank-team {
-        flex-grow: 1;
-        font-weight: 700;
-        font-size: 17px;
-        color: #111;
-    }
-    .rank-pts {
-        font-weight: 700;
-        font-size: 17px;
-        color: #111;
-    }
-    .rank-details {
-        background: white;
-        padding: 16px 20px;
-        border-top: 1px solid #ddd;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    st.markdown("""
-    Ranking of teams based on their **4 best AVC results** plus **4 best FIVB results** 
-    within the last 365 days.  
-    Rankings are updated every Monday after AVC-recognized events that grant AVC Ranking Points.
-    """)
-
-    players_df = load_players()
-    results_df = load_results()
-
-    if players_df.empty or results_df.empty:
-        st.info("No players or results available yet.")
-        return
-
-    # Mapping: full name → list of IDs
-    name_to_id = {}
-    for _, r in players_df.iterrows():
-        full = f"{r['first_name']} {r['last_name']}".strip()
-        name_to_id.setdefault(full, []).append(r["player_id"])
-
-    # Detect valid pairs from results
-    pair_keys = set()
-    for _, res in results_df.iterrows():
-        pid = res["player_id"]
-        teammate = str(res.get("teammate", "")).strip()
-        if teammate and teammate in name_to_id:
-            tm_id = name_to_id[teammate][0]
-            if tm_id != pid:
-                pair_keys.add(tuple(sorted([pid, tm_id])))
-
-    if not pair_keys:
-        st.info("No eligible teams found.")
-        return
-
-    ref_date = date.today()
-    pts_cache = {}
-
-    def get_pts(pid):
-        if pid not in pts_cache:
-            pts_cache[pid] = calculate_player_points(results_df, pid, mode="365", ref_date=ref_date)
-        return pts_cache[pid]
-
-    men_rows, women_rows = [], []
-    men_det, women_det = {}, {}
-
-    # Build rows for men & women rankings
-    for pid_a, pid_b in pair_keys:
-        pa = get_player_by_id(players_df, pid_a)
-        pb = get_player_by_id(players_df, pid_b)
-        if pa is None or pb is None:
-            continue
-
-        # Only same-gender pairs
-        if pa["gender"] == "Male" and pb["gender"] == "Male":
-            cat = "Men"
-        elif pa["gender"] == "Female" and pb["gender"] == "Female":
-            cat = "Women"
-        else:
-            continue
-
-        r1 = get_pts(pid_a)
-        r2 = get_pts(pid_b)
-        total = r1["total_points"] + r2["total_points"]
-
-        nat = pa["nationality"]
-        team_name = f"{shirt_or_name(pa)} / {shirt_or_name(pb)}"
-        key = f"{pid_a}|{pid_b}"
-
-        row = {
-            "key": key,
-            "Nationality": nat,
-            "Team Name": team_name,
-            "Total": total,
-        }
-        data = {"p1": pa, "p2": pb, "r1": r1, "r2": r2}
-
-        if cat == "Men":
-            men_rows.append(row)
-            men_det[key] = data
-        else:
-            women_rows.append(row)
-            women_det[key] = data
-
-    # Men / Women toggle
-    tab = st.radio("Select category", ["Men", "Women"])
-
-    if tab == "Men":
-        rows = men_rows
-        details = men_det
-    else:
-        rows = women_rows
-        details = women_det
-
-    if not rows:
-        st.info("No teams in this category.")
-        return
-
-    # Sort by total points and add rank
-    df = pd.DataFrame(rows)
-    df = df.sort_values("Total", ascending=False).reset_index(drop=True)
-    df.insert(0, "Rank", range(1, len(df) + 1))
-
-    # Search bar
-    search = st.text_input("🔍 Search team or player name").lower().strip()
-
-    filtered_rows = []
-    for _, row in df.iterrows():
-        key = row["key"]
-        d = details[key]
-        p1, p2 = d["p1"], d["p2"]
-
-        content = (
-            row["Team Name"].lower()
-            + p1["first_name"].lower()
-            + p1["last_name"].lower()
-            + p2["first_name"].lower()
-            + p2["last_name"].lower()
-            + str(p1.get("shirt_name", "")).lower()
-            + str(p2.get("shirt_name", "")).lower()
-        )
-
-        if search and search not in content:
-            continue
-
-        filtered_rows.append(row)
-
-    if not filtered_rows:
-        st.info("No matching teams.")
-        return
-
-    # Render each team as a <details> card
-    for row in filtered_rows:
-        key = row["key"]
-        d = details[key]
-        p1, p2 = d["p1"], d["p2"]
-        r1, r2 = d["r1"], d["r2"]
-
-        rank = row["Rank"]
-        nat = row["Nationality"]
-        team_name = row["Team Name"]
-        total = row["Total"]
-
-        # Start HTML card
-        html = f"""<details class="rank-card">
-<summary class="rank-summary">
-<div class="rank-num">{rank}</div>
-<div class="rank-nat">{nat}</div>
-<div class="rank-team">{team_name}</div>
-<div class="rank-pts">{total:.2f} pts</div>
-</summary>
-<div class="rank-details">
-
-<h4 style="margin-top:0;">Player Breakdown</h4>
-
-<table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
-<tr style="background:#f3f6ff; font-weight:600;">
-    <td style="padding:6px; border:1px solid #ccc;">Player</td>
-    <td style="padding:6px; border:1px solid #ccc;">Shirt Name</td>
-    <td style="padding:6px; border:1px solid #ccc;">AVC (Best 4)</td>
-    <td style="padding:6px; border:1px solid #ccc;">FIVB (Best 4)</td>
-    <td style="padding:6px; border:1px solid #ccc;">Total</td>
-</tr>
-
-<tr>
-    <td style="padding:6px; border:1px solid #ccc;">{p1['first_name']} {p1['last_name']}</td>
-    <td style="padding:6px; border:1px solid #ccc;">{shirt_or_name(p1)}</td>
-    <td style="padding:6px; border:1px solid #ccc;">{r1['bucket1_points']:.2f}</td>
-    <td style="padding:6px; border:1px solid #ccc;">{r1['bucket2_points']:.2f}</td>
-    <td style="padding:6px; border:1px solid #ccc; font-weight:700;">{r1['total_points']:.2f}</td>
-</tr>
-
-<tr>
-    <td style="padding:6px; border:1px solid #ccc;">{p2['first_name']} {p2['last_name']}</td>
-    <td style="padding:6px; border:1px solid #ccc;">{shirt_or_name(p2)}</td>
-    <td style="padding:6px; border:1px solid #ccc;">{r2['bucket1_points']:.2f}</td>
-    <td style="padding:6px; border:1px solid #ccc;">{r2['bucket2_points']:.2f}</td>
-    <td style="padding:6px; border:1px solid #ccc; font-weight:700;">{r2['total_points']:.2f}</td>
-</tr>
-</table>
-
-<h4>Selected Events Used in Calculation</h4>
-
-<b>Player A – {p1['first_name']} {p1['last_name']}</b><br>
-<table style="width:100%; border-collapse:collapse; margin:8px 0 18px 0;">
-<tr style="background:#eef2ff; font-weight:600;">
-    <td style="padding:5px; border:1px solid #ccc;">Date</td>
-    <td style="padding:5px; border:1px solid #ccc;">Event</td>
-    <td style="padding:5px; border:1px solid #ccc;">Tournament</td>
-    <td style="padding:5px; border:1px solid #ccc;">Points</td>
-</tr>
-"""
-
-        # Player A events
-        sel1 = r1["selected_results"]
-        for _, ev in sel1.iterrows():
-            html += f"""
-<tr>
-    <td style="padding:5px; border:1px solid #ddd;">{ev['date']}</td>
-    <td style="padding:5px; border:1px solid #ddd;">{ev['event_type']}</td>
-    <td style="padding:5px; border:1px solid #ddd;">{ev['tournament_name']}</td>
-    <td style="padding:5px; border:1px solid #ddd;">{ev['points']}</td>
-</tr>
-"""
-
-        html += "</table>"
-
-        # Player B events
-        html += f"""
-<b>Player B – {p2['first_name']} {p2['last_name']}</b><br>
-<table style="width:100%; border-collapse:collapse; margin:8px 0 8px 0;">
-<tr style="background:#eef2ff; font-weight:600;">
-    <td style="padding:5px; border:1px solid #ccc;">Date</td>
-    <td style="padding:5px; border:1px solid #ccc;">Event</td>
-    <td style="padding:5px; border:1px solid #ccc;">Tournament</td>
-    <td style="padding:5px; border:1px solid #ccc;">Points</td>
-</tr>
-"""
-
-        sel2 = r2["selected_results"]
-        for _, ev in sel2.iterrows():
-            html += f"""
-<tr>
-    <td style="padding:5px; border:1px solid #ddd;">{ev['date']}</td>
-    <td style="padding:5px; border:1px solid #ddd;">{ev['event_type']}</td>
-    <td style="padding:5px; border:1px solid #ddd;">{ev['tournament_name']}</td>
-    <td style="padding:5px; border:1px solid #ddd;">{ev['points']}</td>
-</tr>
-"""
-
-        html += "</table></div></details>"
-
-        st.markdown(html, unsafe_allow_html=True)
-
-
+                st.info("No teammate entries from Player A's side.")
+        with colB:
+            st.markdown(f"**View from {nameB}'s results**")
+            if not together_b.empty:
+                colsB = [c for c in together_b.columns if c not in ['result_id', 'player_id']]
+                st.dataframe(together_b.sort_values('date', ascending=False)[colsB], use_container_width=True)
+            else:
+                st.info("No teammate entries from Player B's side.")
 # -------------------------
 # MAIN SIDEBAR / ROUTER
 # -------------------------
 
 def main():
     st.sidebar.title("🏐 Player Database")
-    if USE_GITHUB:
-        st.sidebar.success("GitHub storage: ON")
-    else:
-        st.sidebar.warning("GitHub storage: OFF (local / ephemeral on Streamlit Cloud)")
-
     page = st.sidebar.radio(
         "Go to",
         [
@@ -1625,9 +1101,7 @@ def main():
             "Import from Excel",
             "Player Search",
             "Ranking Calculator",
-            "Team Combiner (Single)",
-            "Multi-Team Report",
-            "AVC Rankings",
+            "Team Combiner",
         ],
     )
 
@@ -1639,12 +1113,8 @@ def main():
         page_player_search()
     elif page == "Ranking Calculator":
         page_ranking_calculator()
-    elif page == "Team Combiner (Single)":
+    elif page == "Team Combiner":
         page_team_combiner()
-    elif page == "Multi-Team Report":
-        page_multi_team_report()
-    elif page == "AVC Rankings":
-        page_avc_rankings()
 
 
 if __name__ == "__main__":
